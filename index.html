@@ -109,6 +109,7 @@ window.addEventListener('mousemove', e => {
   hint.style.opacity = '0';
 });
 window.addEventListener('touchstart', e => {
+  if (e.target.id === 'back') return;
   e.preventDefault();
   for (const t of e.changedTouches)
     touches.push({ x:t.clientX, y:t.clientY, vx:0, vy:0, id:t.identifier });
