@@ -20,9 +20,22 @@
     white-space: nowrap;
     transition: opacity 2s;
   }
+  #back {
+    position: fixed;
+    top: 20px;
+    left: 20px;
+    z-index: 9999;
+    color: rgba(255,255,255,0.30);
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    font-family: 'Georgia', serif;
+    text-decoration: none;
+    transition: color 0.3s;
+  }
 </style>
 </head>
 <body>
+<a id="back" href="https://yoshiharumatsumoto-newtral.github.io/">← back</a>
 <canvas id="c"></canvas>
 <div id="hint">— touch —</div>
 <script>
