@@ -78,24 +78,152 @@ let micLevel = 0;      // 0.0 – 1.0 smoothed
 let micRaw   = 0;
 let micReady = false;
 
+// ── MDE Soft Analog Sub Bass ──────────────────────────────
+let sharedAC = null, masterGain = null;
+const activeNodes = {};
+
+function getAC() {
+  if (!sharedAC) {
+    sharedAC = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = sharedAC.createGain();
+    masterGain.gain.value = 0.55;
+    masterGain.connect(sharedAC.destination);
+  }
+  return sharedAC;
+}
+
+function noteOn(id, x, y) {
+  if (activeNodes[id]) return;
+  const ac = getAC(); ac.resume();
+  const now = ac.currentTime;
+
+  // ヨナ抜き短音階 (A B C E F) 2オクターブ
+  const YONA = [440.00,493.88,523.25,659.25,698.46,880.00,987.77,1046.50,1318.51,1396.91];
+  const zone = Math.min(Math.floor((x / W) * YONA.length), YONA.length - 1);
+  const freq = YONA[zone];
+
+  // Triangle 2本 + Sine サブ(1oct下)
+  const osc1 = ac.createOscillator();
+  osc1.type = 'triangle'; osc1.frequency.value = freq; osc1.detune.value = -6;
+
+  const osc2 = ac.createOscillator();
+  osc2.type = 'triangle'; osc2.frequency.value = freq; osc2.detune.value = +6;
+
+  const osc3 = ac.createOscillator();
+  osc3.type = 'sine'; osc3.frequency.value = freq * 0.5;
+
+  // 2倍音 偶数倍音 12%
+  const osc4 = ac.createOscillator();
+  osc4.type = 'sine'; osc4.frequency.value = freq * 2;
+  const harmGain = ac.createGain(); harmGain.gain.value = 0.12;
+
+  // Pitch LFO: ±4cent 0.3〜0.7Hz
+  const lfo = ac.createOscillator();
+  const lfoGain = ac.createGain();
+  lfo.type = 'sine';
+  lfo.frequency.value = 0.3 + Math.random() * 0.4;
+  lfoGain.gain.value = 4;
+  lfo.connect(lfoGain);
+  lfoGain.connect(osc1.frequency);
+  lfoGain.connect(osc2.frequency);
+  lfo.start();
+
+  // Lowpass Y軸でカットオフ微調整
+  const filter = ac.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = 1200 + (1 - y / H) * 1500;
+  filter.Q.value = 0.15;
+
+  // 高域カット
+  const hiCut = ac.createBiquadFilter();
+  hiCut.type = 'lowpass';
+  hiCut.frequency.value = 3500;
+  hiCut.Q.value = 0.5;
+
+  // Saturation 極軽微
+  const sat = ac.createWaveShaper();
+  const curve = new Float32Array(512);
+  for (let i = 0; i < 512; i++) {
+    const x2 = (i * 2) / 512 - 1;
+    curve[i] = x2 * (1 + 0.15) / (1 + 0.15 * Math.abs(x2));
+  }
+  sat.curve = curve;
+
+  // ADSR Attack 40ms Decay 200ms Sustain 0.4 Release 350ms
+  const ampEnv = ac.createGain();
+  ampEnv.gain.setValueAtTime(0, now);
+  ampEnv.gain.linearRampToValueAtTime(0.7, now + 0.04);
+  ampEnv.gain.linearRampToValueAtTime(0.4, now + 0.04 + 0.2);
+
+  osc1.connect(filter); osc2.connect(filter); osc3.connect(filter);
+  osc4.connect(harmGain); harmGain.connect(filter);
+  filter.connect(hiCut); hiCut.connect(sat); 
+  
+  const convolver = ac.createConvolver();
+  const len = ac.sampleRate * 1.2;
+  const impulse = ac.createBuffer(2, len, ac.sampleRate);
+
+  for (let ch = 0; ch < 2; ch++) {
+    const data = impulse.getChannelData(ch);
+    for (let i = 0; i < len; i++) {
+      data[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 2);
+    }
+  }
+  
+  convolver.buffer = impulse;
+  const reverbGain = ac.createGain();
+  reverbGain.gain.value = 0.2;
+  
+  sat.connect(convolver);
+  convolver.connect(reverbGain);
+  reverbGain.connect(masterGain);
+  
+  sat.connect(ampEnv);
+  ampEnv.connect(masterGain);
+
+  osc1.start(); osc2.start(); osc3.start(); osc4.start();
+  activeNodes[id] = { osc1, osc2, osc3, osc4, lfo, harmGain, filter, hiCut, ampEnv };
+}
+
+function noteUpdate(id, x, y, vx, vy) {
+  const n = activeNodes[id]; if (!n) return;
+  const ac = getAC();
+  const YONA2 = [440.00,493.88,523.25,659.25,698.46,880.00,987.77,1046.50,1318.51,1396.91];
+  const zone2 = Math.min(Math.floor((x / W) * YONA2.length), YONA2.length - 1);
+  const freq = YONA2[zone2];
+  n.osc1.frequency.setTargetAtTime(freq, ac.currentTime, 0.08);
+  n.osc2.frequency.setTargetAtTime(freq, ac.currentTime, 0.08);
+  n.osc3.frequency.setTargetAtTime(freq * 0.5, ac.currentTime, 0.08);
+  n.osc4.frequency.setTargetAtTime(freq * 2, ac.currentTime, 0.08);
+  n.filter.frequency.setTargetAtTime(1200 + (1 - y / H) * 1500, ac.currentTime, 0.1);
+}
+
+function noteOff(id) {
+  const n = activeNodes[id]; if (!n) return;
+  const ac = getAC();
+  n.ampEnv.gain.setTargetAtTime(0, ac.currentTime, 0.12);
+  setTimeout(() => {
+    try { n.osc1.stop(); n.osc2.stop(); n.osc3.stop(); n.osc4.stop(); n.lfo.stop(); } catch(e) {}
+    delete activeNodes[id];
+  }, 800);
+}
+
 async function initMic() {
   try {
+    const ac = getAC();
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    const ac  = new AudioContext();
     const src = ac.createMediaStreamSource(stream);
-    const an  = ac.createAnalyser();
-    an.fftSize = 256;
+    const an = ac.createAnalyser(); an.fftSize = 256;
     src.connect(an);
     const buf = new Uint8Array(an.frequencyBinCount);
     micReady = true;
-
     function tick() {
       an.getByteTimeDomainData(buf);
       let sum = 0;
-      for (let i=0; i<buf.length; i++) { const v = (buf[i]-128)/128; sum += v*v; }
-      micRaw = Math.sqrt(sum/buf.length);          // RMS 0–1
-      micLevel += (micRaw*6.0 - micLevel) * 0.25;  // smooth
-      micLevel  = Math.min(Math.max(micLevel,0),1);
+      for (let i=0; i<buf.length; i++) { const v=(buf[i]-128)/128; sum+=v*v; }
+      micRaw = Math.sqrt(sum/buf.length);
+      micLevel += (micRaw*6.0 - micLevel) * 0.25;
+      micLevel = Math.min(Math.max(micLevel,0),1);
       requestAnimationFrame(tick);
     }
     tick();
@@ -111,15 +239,17 @@ window.addEventListener('mousemove', e => {
 window.addEventListener('touchstart', e => {
   if (e.target.id === 'back') return;
   e.preventDefault();
-  for (const t of e.changedTouches)
+  for (const t of e.changedTouches) {
     touches.push({ x:t.clientX, y:t.clientY, vx:0, vy:0, id:t.identifier });
+    noteOn(t.identifier, t.clientX, t.clientY);
+  }
   hint.style.opacity = '0';
 }, { passive:false });
 window.addEventListener('touchmove', e => {
   e.preventDefault();
   for (const t of e.changedTouches) {
     const p = touches.find(p => p.id === t.identifier);
-    if (p) { p.vx = t.clientX-p.x; p.vy = t.clientY-p.y; p.x = t.clientX; p.y = t.clientY; }
+    if (p) { p.vx = t.clientX-p.x; p.vy = t.clientY-p.y; p.x = t.clientX; p.y = t.clientY; noteUpdate(t.identifier, t.clientX, t.clientY, p.vx, p.vy); }
     if (e.touches[0].identifier === t.identifier) {
       mouse.vx = t.clientX-mouse.x; mouse.vy = t.clientY-mouse.y;
       mouse.x = t.clientX; mouse.y = t.clientY;
@@ -130,6 +260,7 @@ window.addEventListener('touchend', e => {
   for (const t of e.changedTouches) {
     const i = touches.findIndex(p => p.id === t.identifier);
     if (i !== -1) touches.splice(i,1);
+    noteOff(t.identifier);
   }
 }, { passive:false });
 
