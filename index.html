@@ -157,28 +157,7 @@ function noteOn(id, x, y) {
 
   osc1.connect(filter); osc2.connect(filter); osc3.connect(filter);
   osc4.connect(harmGain); harmGain.connect(filter);
-  filter.connect(hiCut); hiCut.connect(sat); 
-  
-  const convolver = ac.createConvolver();
-  const len = ac.sampleRate * 1.2;
-  const impulse = ac.createBuffer(2, len, ac.sampleRate);
-
-  for (let ch = 0; ch < 2; ch++) {
-    const data = impulse.getChannelData(ch);
-    for (let i = 0; i < len; i++) {
-      data[i] = (Math.random()*2-1) * Math.pow(1 - i/len, 2);
-    }
-  }
-  
-  convolver.buffer = impulse;
-  const reverbGain = ac.createGain();
-  reverbGain.gain.value = 0.2;
-  
-  sat.connect(convolver);
-  convolver.connect(reverbGain);
-  reverbGain.connect(masterGain);
-  
-  sat.connect(ampEnv);
+  filter.connect(hiCut); hiCut.connect(sat); sat.connect(ampEnv);
   ampEnv.connect(masterGain);
 
   osc1.start(); osc2.start(); osc3.start(); osc4.start();
