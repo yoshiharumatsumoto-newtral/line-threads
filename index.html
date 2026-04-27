@@ -7,6 +7,24 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #000; overflow: hidden; cursor: none; }
   canvas { display: block; }
+
+  #start {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    color: #fff;
+    font-family: sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.35em;
+    cursor: pointer;
+    z-index: 10;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
   #hint {
     position: fixed;
     bottom: 28px;
@@ -20,6 +38,7 @@
     white-space: nowrap;
     transition: opacity 2s;
   }
+
   #back {
     position: fixed;
     top: 20px;
@@ -35,6 +54,7 @@
 </style>
 </head>
 <body>
+<div id="start">TAP TO START</div>
 <a id="back" href="https://yoshiharumatsumoto-newtral.github.io/">← back</a>
 <canvas id="c"></canvas>
 <div id="hint">— touch —</div>
@@ -45,6 +65,7 @@ if (screen.orientation && screen.orientation.lock) {
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+const startScreen = document.getElementById('start');
 
 const DPR = window.devicePixelRatio || 1;
 let W = window.innerWidth;
@@ -73,6 +94,7 @@ const hint = document.getElementById('hint');
 let micLevel = 0;
 let micRaw   = 0;
 let micReady = false;
+let started  = false;
 
 // ── 音用AudioContext（演奏専用）──────────────────────────────
 let soundAC = null;
@@ -92,9 +114,8 @@ function getSoundAC() {
 
 // ── マイク用AudioContext（別インスタンス）───────────────────
 let micAC = null;
-
-// 最初のタッチ時にマイクを起動（ページロード時ではない）
 let micInitialized = false;
+
 async function initMic() {
   if (micInitialized) return;
   micInitialized = true;
@@ -118,13 +139,36 @@ async function initMic() {
     tick();
   } catch(e) {
     console.warn('Mic not available', e);
-    micInitialized = false; // 失敗したらリセット
+    micInitialized = false;
   }
 }
 
+// ── TAP TO START ─────────────────────────────────────────────
+function handleStart(e) {
+  e.preventDefault();
+  if (started) return;
+  started = true;
+
+  getSoundAC();
+
+  // 無音バッファでSafariをアンロック
+  const ac = soundAC;
+  const buf = ac.createBuffer(1, 1, 22050);
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  src.connect(ac.destination);
+  src.start(0);
+
+  initMic();
+  startScreen.style.display = 'none';
+}
+
+startScreen.addEventListener('touchstart', handleStart, { passive: false });
+startScreen.addEventListener('click', handleStart);
+
 // ── noteOn ──────────────────────────────────────────────────
 function noteOn(id, x, y) {
-  // 既存ノードがあれば先に確実に止める
+  if (!started) return;
   if (activeNodes[id]) noteOff(id, true);
 
   const ac = getSoundAC();
@@ -185,7 +229,6 @@ function noteOn(id, x, y) {
   sat.connect(ampEnv); ampEnv.connect(masterGain);
 
   [osc1, osc2, osc3, osc4].forEach(o => o.start());
-
   activeNodes[id] = { osc1, osc2, osc3, osc4, lfo, subGain, harmGain, filter, hiCut, ampEnv, stopped: false };
 }
 
@@ -205,7 +248,7 @@ function noteUpdate(id, x, y) {
 // ── noteOff ─────────────────────────────────────────────────
 function noteOff(id, immediate = false) {
   const n = activeNodes[id]; if (!n || n.stopped) return;
-  n.stopped = true; // 二重実行防止フラグ
+  n.stopped = true;
 
   const ac = getSoundAC();
   const releaseTime = immediate ? 0.02 : 0.3;
@@ -217,11 +260,8 @@ function noteOff(id, immediate = false) {
     try { o.stop(stopAt); } catch(e) {}
   });
 
-  // 確実にクリーンアップ
   setTimeout(() => {
-    try {
-      n.ampEnv.disconnect();
-    } catch(e) {}
+    try { n.ampEnv.disconnect(); } catch(e) {}
     delete activeNodes[id];
   }, (releaseTime * 5 + 0.1) * 1000);
 }
@@ -234,10 +274,8 @@ window.addEventListener('mousemove', e => {
 });
 
 window.addEventListener('touchstart', e => {
-  if (e.target.id === 'back') return;
+  if (e.target.id === 'back' || e.target.id === 'start') return;
   e.preventDefault();
-  // 最初のタッチでマイク起動
-  initMic();
   for (const t of e.changedTouches) {
     touches.push({ x:t.clientX, y:t.clientY, vx:0, vy:0, id:t.identifier });
     noteOn(t.identifier, t.clientX, t.clientY);
@@ -269,7 +307,6 @@ window.addEventListener('touchend', e => {
   }
 }, { passive:false });
 
-// 画面から指が全部離れた時の安全弁
 window.addEventListener('touchcancel', e => {
   for (const t of e.changedTouches) {
     const i = touches.findIndex(p => p.id === t.identifier);
