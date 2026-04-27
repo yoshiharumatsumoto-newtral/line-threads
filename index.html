@@ -74,43 +74,78 @@ let micLevel = 0;
 let micRaw   = 0;
 let micReady = false;
 
-// ── Audio ──────────────────────────────────────────────────
-let sharedAC = null, masterGain = null;
+// ── 音用AudioContext（演奏専用）──────────────────────────────
+let soundAC = null;
+let masterGain = null;
 const activeNodes = {};
 
-function getAC() {
-  if (!sharedAC) {
-    sharedAC = new (window.AudioContext || window.webkitAudioContext)();
-    masterGain = sharedAC.createGain();
+function getSoundAC() {
+  if (!soundAC) {
+    soundAC = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = soundAC.createGain();
     masterGain.gain.value = 0.30;
-    masterGain.connect(sharedAC.destination);
+    masterGain.connect(soundAC.destination);
   }
-  return sharedAC;
+  if (soundAC.state === 'suspended') soundAC.resume();
+  return soundAC;
+}
+
+// ── マイク用AudioContext（別インスタンス）───────────────────
+let micAC = null;
+
+// 最初のタッチ時にマイクを起動（ページロード時ではない）
+let micInitialized = false;
+async function initMic() {
+  if (micInitialized) return;
+  micInitialized = true;
+  try {
+    micAC = new (window.AudioContext || window.webkitAudioContext)();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const src = micAC.createMediaStreamSource(stream);
+    const an = micAC.createAnalyser(); an.fftSize = 256;
+    src.connect(an);
+    const buf = new Uint8Array(an.frequencyBinCount);
+    micReady = true;
+    function tick() {
+      an.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i=0; i<buf.length; i++) { const v=(buf[i]-128)/128; sum+=v*v; }
+      micRaw = Math.sqrt(sum/buf.length);
+      micLevel += (micRaw*6.0 - micLevel) * 0.25;
+      micLevel = Math.min(Math.max(micLevel,0),1);
+      requestAnimationFrame(tick);
+    }
+    tick();
+  } catch(e) {
+    console.warn('Mic not available', e);
+    micInitialized = false; // 失敗したらリセット
+  }
 }
 
 // ── noteOn ──────────────────────────────────────────────────
 function noteOn(id, x, y) {
-  if (activeNodes[id]) return;
-  const ac = getAC(); ac.resume();
+  // 既存ノードがあれば先に確実に止める
+  if (activeNodes[id]) noteOff(id, true);
+
+  const ac = getSoundAC();
   const now = ac.currentTime;
 
   const YONA = [440.00,493.88,523.25,659.25,698.46,880.00,987.77,1046.50,1318.51,1396.91];
   const zone = Math.min(Math.floor((x / W) * YONA.length), YONA.length - 1);
   const freq = YONA[zone];
-  const f = freq * 1.0000;
 
   const osc1 = ac.createOscillator();
-  osc1.type = 'triangle'; osc1.frequency.value = f; osc1.detune.value = -6;
+  osc1.type = 'triangle'; osc1.frequency.value = freq; osc1.detune.value = -6;
 
   const osc2 = ac.createOscillator();
-  osc2.type = 'triangle'; osc2.frequency.value = f; osc2.detune.value = +6;
+  osc2.type = 'triangle'; osc2.frequency.value = freq; osc2.detune.value = +6;
 
   const osc3 = ac.createOscillator();
-  osc3.type = 'sine'; osc3.frequency.value = f * 0.5;
+  osc3.type = 'sine'; osc3.frequency.value = freq * 0.5;
   const subGain = ac.createGain(); subGain.gain.value = 0.30;
 
   const osc4 = ac.createOscillator();
-  osc4.type = 'sine'; osc4.frequency.value = f * 2;
+  osc4.type = 'sine'; osc4.frequency.value = freq * 2;
   const harmGain = ac.createGain(); harmGain.gain.value = 0.12;
 
   const lfo = ac.createOscillator();
@@ -150,13 +185,14 @@ function noteOn(id, x, y) {
   sat.connect(ampEnv); ampEnv.connect(masterGain);
 
   [osc1, osc2, osc3, osc4].forEach(o => o.start());
-  activeNodes[id] = { osc1, osc2, osc3, osc4, lfo, subGain, harmGain, filter, hiCut, ampEnv };
+
+  activeNodes[id] = { osc1, osc2, osc3, osc4, lfo, subGain, harmGain, filter, hiCut, ampEnv, stopped: false };
 }
 
 // ── noteUpdate ──────────────────────────────────────────────
-function noteUpdate(id, x, y, vx, vy) {
-  const n = activeNodes[id]; if (!n) return;
-  const ac = getAC();
+function noteUpdate(id, x, y) {
+  const n = activeNodes[id]; if (!n || n.stopped) return;
+  const ac = getSoundAC();
   const YONA = [440.00,493.88,523.25,659.25,698.46,880.00,987.77,1046.50,1318.51,1396.91];
   const zone = Math.min(Math.floor((x / W) * YONA.length), YONA.length - 1);
   const freq = YONA[zone];
@@ -167,65 +203,64 @@ function noteUpdate(id, x, y, vx, vy) {
 }
 
 // ── noteOff ─────────────────────────────────────────────────
-function noteOff(id) {
-  const n = activeNodes[id]; if (!n) return;
-  const ac = getAC();
-  n.ampEnv.gain.setTargetAtTime(0, ac.currentTime, 0.105);
+function noteOff(id, immediate = false) {
+  const n = activeNodes[id]; if (!n || n.stopped) return;
+  n.stopped = true; // 二重実行防止フラグ
+
+  const ac = getSoundAC();
+  const releaseTime = immediate ? 0.02 : 0.3;
+  n.ampEnv.gain.cancelScheduledValues(ac.currentTime);
+  n.ampEnv.gain.setTargetAtTime(0, ac.currentTime, releaseTime);
+
+  const stopAt = ac.currentTime + releaseTime * 5;
+  [n.osc1, n.osc2, n.osc3, n.osc4, n.lfo].forEach(o => {
+    try { o.stop(stopAt); } catch(e) {}
+  });
+
+  // 確実にクリーンアップ
   setTimeout(() => {
-    try { [n.osc1, n.osc2, n.osc3, n.osc4, n.lfo].forEach(o => o.stop()); } catch(e) {}
+    try {
+      n.ampEnv.disconnect();
+    } catch(e) {}
     delete activeNodes[id];
-  }, 850);
+  }, (releaseTime * 5 + 0.1) * 1000);
 }
 
-// ── Mic ─────────────────────────────────────────────────────
-async function initMic() {
-  try {
-    const ac = getAC();
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    const src = ac.createMediaStreamSource(stream);
-    const an = ac.createAnalyser(); an.fftSize = 256;
-    src.connect(an);
-    const buf = new Uint8Array(an.frequencyBinCount);
-    micReady = true;
-    function tick() {
-      an.getByteTimeDomainData(buf);
-      let sum = 0;
-      for (let i=0; i<buf.length; i++) { const v=(buf[i]-128)/128; sum+=v*v; }
-      micRaw = Math.sqrt(sum/buf.length);
-      micLevel += (micRaw*6.0 - micLevel) * 0.25;
-      micLevel = Math.min(Math.max(micLevel,0),1);
-      requestAnimationFrame(tick);
-    }
-    tick();
-  } catch(e) { console.warn('Mic not available', e); }
-}
-initMic();
-
+// ── イベント ─────────────────────────────────────────────────
 window.addEventListener('mousemove', e => {
   mouse.vx = e.clientX - mouse.x; mouse.vy = e.clientY - mouse.y;
   mouse.x = e.clientX; mouse.y = e.clientY; mouse.active = true;
   hint.style.opacity = '0';
 });
+
 window.addEventListener('touchstart', e => {
   if (e.target.id === 'back') return;
   e.preventDefault();
+  // 最初のタッチでマイク起動
+  initMic();
   for (const t of e.changedTouches) {
     touches.push({ x:t.clientX, y:t.clientY, vx:0, vy:0, id:t.identifier });
     noteOn(t.identifier, t.clientX, t.clientY);
   }
   hint.style.opacity = '0';
 }, { passive:false });
+
 window.addEventListener('touchmove', e => {
   e.preventDefault();
   for (const t of e.changedTouches) {
     const p = touches.find(p => p.id === t.identifier);
-    if (p) { p.vx = t.clientX-p.x; p.vy = t.clientY-p.y; p.x = t.clientX; p.y = t.clientY; noteUpdate(t.identifier, t.clientX, t.clientY, p.vx, p.vy); }
+    if (p) {
+      p.vx = t.clientX-p.x; p.vy = t.clientY-p.y;
+      p.x = t.clientX; p.y = t.clientY;
+      noteUpdate(t.identifier, t.clientX, t.clientY);
+    }
     if (e.touches[0].identifier === t.identifier) {
       mouse.vx = t.clientX-mouse.x; mouse.vy = t.clientY-mouse.y;
       mouse.x = t.clientX; mouse.y = t.clientY;
     }
   }
 }, { passive:false });
+
 window.addEventListener('touchend', e => {
   for (const t of e.changedTouches) {
     const i = touches.findIndex(p => p.id === t.identifier);
@@ -233,6 +268,15 @@ window.addEventListener('touchend', e => {
     noteOff(t.identifier);
   }
 }, { passive:false });
+
+// 画面から指が全部離れた時の安全弁
+window.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) {
+    const i = touches.findIndex(p => p.id === t.identifier);
+    if (i !== -1) touches.splice(i,1);
+    noteOff(t.identifier, true);
+  }
+});
 
 // ── Colour palette ───────────────────────────────────────────
 const PALETTE = [
